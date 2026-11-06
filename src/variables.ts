@@ -19,6 +19,10 @@ export function UpdateVariableDefinitions(self: ModuleInstance): void {
 		{ variableId: 'mac_wifi', name: 'Wi-Fi MAC reported by the TV' },
 		{ variableId: 'mac_wired', name: 'Wired MAC reported by the TV' },
 		{ variableId: 'last_error', name: 'Last command error (time and message)' },
+		{
+			variableId: 'power_pending',
+			name: 'Power request in progress (turning_on/turning_off/no_response, empty when settled)',
+		},
 	])
 
 	UpdateVariableValues(self)
@@ -58,6 +62,7 @@ export function UpdateVariableValues(self: ModuleInstance): void {
 		mac_wifi: self.detectedMacs.wifi,
 		mac_wired: self.detectedMacs.wired,
 		last_error: self.lastError,
+		power_pending: self.powerPending,
 	}
 
 	self.setVariableValues(values)

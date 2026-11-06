@@ -16,8 +16,7 @@ export function UpdateActions(self: ModuleInstance): void {
 			name: 'Power On',
 			options: [],
 			callback: async () => {
-				self.sendWakeOnLan()
-				void self.updateFeedbackState()
+				self.requestPowerOn()
 			},
 		},
 
@@ -25,14 +24,7 @@ export function UpdateActions(self: ModuleInstance): void {
 			name: 'Power Off',
 			options: [],
 			callback: async () => {
-				const lgtv = self.lgtv
-				if (lgtv) {
-					await self.runExclusive(async () => {
-						await lgtv.powerOff()
-					})
-					self.log('debug', 'Power off')
-					self.markPoweredOff()
-				}
+				await self.requestPowerOff()
 			},
 		},
 

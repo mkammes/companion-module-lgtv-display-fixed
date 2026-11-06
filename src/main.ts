@@ -45,6 +45,11 @@ const FAST_RECONNECT_WINDOW_MS = 120000
 const WOL_REPEATS = 5
 const WOL_SPACING_MS = 500
 const WOL_PORTS = [9, 7]
+// After Power On, repeat the burst this often until the TV answers, for up to
+// WAKE_WINDOW_MS. A TV that is still shutting down (Off then On within a few
+// seconds) or slow to bring up Wi-Fi ignores the first burst.
+const WAKE_RETRY_MS = 3000
+const WAKE_WINDOW_MS = 60000
 // Every task on the socket is capped so a library promise that never settles
 // (its listeners were dropped by a disconnect) can't block the queue forever.
 // The poll runs four reads of up to 5 s each.
@@ -101,6 +106,10 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	// MACs the TV reported about itself (GET_MACADDRESS), kept across reconnects.
 	detectedMacs: { wifi: string; wired: string } = { wifi: '', wired: '' }
 	lastError = ''
+	// Power request in progress, exposed as the power_pending variable:
+	// '' (none), 'turning_on', 'turning_off', or 'no_response' (the TV never answered).
+	powerPending: '' | 'turning_on' | 'turning_off' | 'no_response' = ''
+	private wakeRetryTimer: NodeJS.Timeout | undefined = undefined
 
 	constructor(internal: unknown) {
 		super(internal)
@@ -175,6 +184,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 		}
 		this.stopFeedbackPolling()
 		this.clearWolTimers()
+		this.stopWakeRetries()
 		this.commandQueue.clear()
 		if (this.lgtv) {
 			this.lgtv.disconnect()
@@ -288,6 +298,8 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	// close the socket (the TV will drop off Wi-Fi anyway) instead of waiting for
 	// polls to time out. The reconnect loop picks it up again when it comes back.
 	markPoweredOff(): void {
+		this.stopWakeRetries()
+		this.powerPending = ''
 		this.connectFailures = 1 // skip the "TV may be off" info log, this was expected
 		this.onConnectionLost(new Error('powered off'))
 		this.feedbackState = { ...this.feedbackState, powerState: PowerStates.off }
@@ -365,6 +377,62 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 		this.checkVariables()
 	}
 
+	// Power On: wake the TV and keep waking it until it answers or the window ends.
+	requestPowerOn(): void {
+		this.stopWakeRetries()
+		this.powerPending = 'turning_on'
+		this.checkVariables()
+		this.sendWakeOnLan()
+		const deadline = Date.now() + WAKE_WINDOW_MS
+		this.wakeRetryTimer = setInterval(() => {
+			if (this.powerPending !== 'turning_on') {
+				this.stopWakeRetries()
+				return
+			}
+			if (Date.now() >= deadline) {
+				this.stopWakeRetries()
+				this.powerPending = 'no_response'
+				this.log('warn', `Power on: ${this.config?.host} did not answer within ${WAKE_WINDOW_MS / 1000}s`)
+				this.checkVariables()
+				return
+			}
+			this.sendWakeOnLan(true)
+		}, WAKE_RETRY_MS)
+		void this.updateFeedbackState()
+	}
+
+	// Power Off: only reports success once the TV acknowledged it.
+	async requestPowerOff(): Promise<void> {
+		this.stopWakeRetries()
+		const lgtv = this.lgtv
+		if (!lgtv || !this.isConnected()) {
+			this.powerPending = 'no_response'
+			this.lastError = `${new Date().toISOString().slice(11, 19)} power off: TV not connected`
+			this.log('warn', `Power off: ${this.config?.host} is not connected, command not sent`)
+			this.checkVariables()
+			return
+		}
+		this.powerPending = 'turning_off'
+		this.checkVariables()
+		try {
+			await this.runExclusive(async () => {
+				await lgtv.powerOff()
+			})
+		} catch {
+			// runExclusive already logged it and set last_error
+			this.powerPending = 'no_response'
+			this.checkVariables()
+			return
+		}
+		this.log('debug', 'Power off')
+		this.markPoweredOff()
+	}
+
+	private stopWakeRetries(): void {
+		if (this.wakeRetryTimer) clearInterval(this.wakeRetryTimer)
+		this.wakeRetryTimer = undefined
+	}
+
 	private clearWolTimers(): void {
 		for (const timer of this.wolTimers) clearTimeout(timer)
 		this.wolTimers = []
@@ -406,7 +474,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	// MAC (config MAC, second MAC and the MACs the TV reported), to the configured
 	// broadcast address, the limited broadcast and the TV's own IP, on ports 9 and 7.
 	// Then retry the connection quickly so feedback catches up within seconds.
-	sendWakeOnLan(): void {
+	sendWakeOnLan(quiet = false): void {
 		const macs = [
 			normalizeMac(this.config?.mac),
 			normalizeMac(this.config?.mac2),
@@ -437,7 +505,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 		})
 
 		this.log(
-			'info',
+			quiet ? 'debug' : 'info',
 			`Power on: Wake-On-LAN burst for ${macs.join(', ')} to ${addresses.join(', ')} ports ${WOL_PORTS.join('/')}`,
 		)
 
@@ -610,6 +678,14 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			} else {
 				this.failedPolls = 0
 				this.lastGoodPoll = Date.now()
+				// The TV answered: a finished or failed power request is settled.
+				if (
+					(this.powerPending === 'turning_on' && nextState.powerState === PowerStates.on) ||
+					this.powerPending === 'no_response'
+				) {
+					this.stopWakeRetries()
+					this.powerPending = ''
+				}
 			}
 
 			this.feedbackState = nextState
