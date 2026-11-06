@@ -605,6 +605,9 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			}
 
 			const lgtv = this.lgtv
+			// Bumped by onConnectionLost (e.g. Power Off acknowledged mid-poll); a poll
+			// that started before that must not overwrite the newer state.
+			const gen = this.connectGen
 			const nextState: FeedbackState = { ...this.feedbackState }
 
 			// Read everything in one exclusive turn so the four commands stay together
@@ -665,8 +668,8 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 				powerReadFailed = true
 			}
 
-			// The connection was replaced while we were reading: ignore this result.
-			if (lgtv !== this.lgtv) return
+			// The connection was replaced or dropped while we were reading: ignore this result.
+			if (lgtv !== this.lgtv || gen !== this.connectGen) return
 
 			if (powerReadFailed) {
 				this.failedPolls++
