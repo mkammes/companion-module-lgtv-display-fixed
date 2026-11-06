@@ -1,6 +1,6 @@
 {
 	"name": "lgtv-display",
-	"version": "2.1.0-beta.2",
+	"version": "2.1.0-kcm.2",
 	"type": "module",
 	"main": "dist/main.js",
 	"scripts": {
@@ -15,7 +15,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/bitfocus/companion-module-lgtv-display.git"
+		"url": "git+https://github.com/mkammes/companion-module-lgtv-display-fixed.git"
 	},
 	"engines": {
 		"node": "^22.20",

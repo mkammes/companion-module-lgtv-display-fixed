@@ -33,6 +33,25 @@ const POLL_MIN = 250
 const POLL_MAX = 60000
 const POLL_DEFAULT = 2000
 
+// A TV that drops off the network (standby on Wi-Fi) leaves the TCP socket open
+// with every read timing out. After this many failed polls in a row we treat the
+// TV as gone instead of keeping the last known values.
+const MAX_FAILED_POLLS = 2
+const RECONNECT_SLOW_MS = 30000
+const RECONNECT_FAST_MS = 3000
+// After Power On, retry the connection quickly for this long.
+const FAST_RECONNECT_WINDOW_MS = 120000
+// Wake-On-LAN burst: rounds, spacing, and UDP ports.
+const WOL_REPEATS = 5
+const WOL_SPACING_MS = 500
+const WOL_PORTS = [9, 7]
+const MAC_RE = /([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}/
+
+function normalizeMac(value: string | undefined | null): string {
+	const match = (value ?? '').match(MAC_RE)
+	return match ? match[0].replace(/-/g, ':').toUpperCase() : ''
+}
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error)
 }
@@ -63,6 +82,11 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	// Failed connects in a row, so the "TV may be off" notice logs only once.
 	private connectFailures = 0
 	private commandQueue = new PQueue({ concurrency: 1 })
+	private failedPolls = 0
+	private fastReconnectUntil = 0
+	private wolTimers: NodeJS.Timeout[] = []
+	// MACs the TV reported about itself (GET_MACADDRESS), kept across reconnects.
+	detectedMacs: { wifi: string; wired: string } = { wifi: '', wired: '' }
 
 	constructor(internal: unknown) {
 		super(internal)
@@ -73,8 +97,12 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	}
 
 	async configUpdated(config: ModuleConfig): Promise<void> {
+		if (this.config && this.config.host !== config.host) {
+			this.detectedMacs = { wifi: '', wired: '' }
+		}
 		this.config = config
 		this.connectFailures = 0
+		this.failedPolls = 0
 		this.stopFeedbackPolling()
 
 		this.updateFeedbacks()
@@ -92,6 +120,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			this.reconnectTimer = null
 		}
 		this.stopFeedbackPolling()
+		this.clearWolTimers()
 		this.commandQueue.clear()
 		if (this.lgtv) {
 			this.lgtv.disconnect()
@@ -121,6 +150,10 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 
 	checkVariables(): void {
 		UpdateVariableValues(this)
+	}
+
+	isConnected(): boolean {
+		return !!this.lgtv && this.lgtv.connected
 	}
 
 	initLGTV(): void {
@@ -160,8 +193,11 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 					.connect()
 					.then(() => {
 						this.connectFailures = 0
+						this.failedPolls = 0
+						this.fastReconnectUntil = 0
 						this.log('info', `Connected to ${this.config.host}`)
 						this.updateStatus(InstanceStatus.Ok)
+						void this.readMacAddresses()
 						this.startFeedbackPolling()
 					})
 					.catch((error: unknown) => {
@@ -182,6 +218,15 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	// keep retrying quietly so we reconnect automatically when the TV returns.
 	private onConnectionLost(error: unknown): void {
 		this.stopFeedbackPolling()
+		// Close the old socket so a half-dead connection can't keep reporting "connected".
+		if (this.lgtv) {
+			try {
+				this.lgtv.disconnect()
+			} catch {
+				// ignore
+			}
+		}
+		this.commandQueue.clear()
 		this.resetFeedbackState()
 
 		if (this.connectFailures === 0) {
@@ -196,10 +241,51 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 
 		this.updateStatus(InstanceStatus.Disconnected, 'Not connected — the TV may be powered off')
 
-		// Retry every 30s; guard against scheduling more than one timer.
+		// Retry every 30s (every 3s for a while after Power On); guard against
+		// scheduling more than one timer.
 		if (!this.reconnectTimer) {
-			this.reconnectTimer = setTimeout(() => this.initConnection(), 30000)
+			const delay = Date.now() < this.fastReconnectUntil ? RECONNECT_FAST_MS : RECONNECT_SLOW_MS
+			this.reconnectTimer = setTimeout(() => this.initConnection(), delay)
 		}
+	}
+
+	// Ask the TV for its own MACs. The hidden menu tends to show the wired MAC even
+	// when the TV runs on Wi-Fi, and Wake-On-LAN only works on the active interface.
+	private async readMacAddresses(): Promise<void> {
+		const lgtv = this.lgtv
+		if (!lgtv) return
+		try {
+			await this.runExclusive(async () => {
+				for (const type of ['wifi', 'wired'] as const) {
+					try {
+						const mac = normalizeMac(await lgtv.getMacAddress(type))
+						if (mac) this.detectedMacs[type] = mac
+					} catch (error) {
+						this.log('debug', `Could not read ${type} MAC: ${errorMessage(error)}`)
+					}
+				}
+			})
+		} catch {
+			return
+		}
+		const configured = [normalizeMac(this.config.mac), normalizeMac(this.config.mac2)].filter(Boolean)
+		const reported = [this.detectedMacs.wifi, this.detectedMacs.wired].filter(Boolean)
+		this.log(
+			'info',
+			`TV reports Wi-Fi MAC ${this.detectedMacs.wifi || '?'} and wired MAC ${this.detectedMacs.wired || '?'}`,
+		)
+		if (reported.length && !reported.some((mac) => configured.includes(mac))) {
+			this.log(
+				'warn',
+				`None of the configured MACs (${configured.join(', ') || 'none'}) match the TV's own MACs. Power On also wakes the reported ones while this module keeps running, but put the right MAC in the config so it survives a restart.`,
+			)
+		}
+		this.checkVariables()
+	}
+
+	private clearWolTimers(): void {
+		for (const timer of this.wolTimers) clearTimeout(timer)
+		this.wolTimers = []
 	}
 
 	// Clear cached TV state and refresh feedbacks/variables (used when not connected).
@@ -224,42 +310,93 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 		return this.commandQueue.add(task)
 	}
 
-	// The library's powerOn() swallows every send error and can send before the
-	// socket has SO_BROADCAST set, so WoL failures look like nothing happened.
-	// Send the magic packet ourselves instead, and log what actually happened.
+	// The library's powerOn() swallows every send error and sends a single packet.
+	// Over Wi-Fi one packet is easily lost, so send a short burst: to every known
+	// MAC (config MAC, second MAC and the MACs the TV reported), to the configured
+	// broadcast address, the limited broadcast and the TV's own IP, on ports 9 and 7.
+	// Then retry the connection quickly so feedback catches up within seconds.
 	sendWakeOnLan(): void {
-		const mac = this.config?.mac?.trim()
-		if (!mac || !/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(mac)) {
-			this.log('error', `Power on: cannot send Wake-On-LAN, MAC address is missing or invalid ('${mac ?? ''}')`)
+		const macs = [
+			normalizeMac(this.config?.mac),
+			normalizeMac(this.config?.mac2),
+			this.detectedMacs.wifi,
+			this.detectedMacs.wired,
+		].filter((mac, i, all) => mac && all.indexOf(mac) === i)
+		if (macs.length === 0) {
+			this.log(
+				'error',
+				`Power on: cannot send Wake-On-LAN, MAC address is missing or invalid ('${this.config?.mac ?? ''}')`,
+			)
 			return
 		}
 
-		const address = this.config?.wol_ip?.trim() || '255.255.255.255'
-		const port = 9
+		const addresses = [
+			this.config?.wol_ip?.trim() || '255.255.255.255',
+			'255.255.255.255',
+			this.config?.host?.trim() || '',
+		].filter((address, i, all) => address && all.indexOf(address) === i)
 
-		const macBytes = Buffer.from(mac.split(':').map((block) => parseInt(block, 16)))
-		const magicPacket = Buffer.alloc(6 + 16 * 6, 0xff)
-		for (let i = 0; i < 16; i++) {
-			macBytes.copy(magicPacket, 6 + i * 6)
+		const packets = macs.map((mac) => {
+			const macBytes = Buffer.from(mac.split(':').map((block) => parseInt(block, 16)))
+			const magicPacket = Buffer.alloc(6 + 16 * 6, 0xff)
+			for (let i = 0; i < 16; i++) {
+				macBytes.copy(magicPacket, 6 + i * 6)
+			}
+			return magicPacket
+		})
+
+		this.log(
+			'info',
+			`Power on: Wake-On-LAN burst for ${macs.join(', ')} to ${addresses.join(', ')} ports ${WOL_PORTS.join('/')}`,
+		)
+
+		const sendRound = (round: number): void => {
+			const socket = createSocket('udp4')
+			let pending = packets.length * addresses.length * WOL_PORTS.length
+			let closed = false
+			const close = (): void => {
+				if (closed) return
+				closed = true
+				try {
+					socket.close()
+				} catch {
+					// already closed
+				}
+			}
+			socket.on('error', (error) => {
+				this.log('error', `Power on: Wake-On-LAN socket error: ${errorMessage(error)}`)
+				close()
+			})
+			// Bind explicitly so SO_BROADCAST is set before the packets go out.
+			socket.bind(() => {
+				socket.setBroadcast(true)
+				for (const packet of packets) {
+					for (const address of addresses) {
+						for (const port of WOL_PORTS) {
+							socket.send(packet, port, address, (error) => {
+								if (error) {
+									this.log('debug', `Power on: WoL round ${round} to ${address}:${port} failed: ${errorMessage(error)}`)
+								}
+								pending--
+								if (pending <= 0) close()
+							})
+						}
+					}
+				}
+			})
 		}
 
-		const socket = createSocket('udp4')
-		socket.on('error', (error) => {
-			this.log('error', `Power on: Wake-On-LAN socket error: ${errorMessage(error)}`)
-			socket.close()
-		})
-		// Bind explicitly so SO_BROADCAST is set before the packet goes out.
-		socket.bind(() => {
-			socket.setBroadcast(true)
-			socket.send(magicPacket, port, address, (error) => {
-				if (error) {
-					this.log('error', `Power on: Wake-On-LAN to ${address}:${port} failed: ${errorMessage(error)}`)
-				} else {
-					this.log('debug', `Power on: Wake-On-LAN sent to ${address}:${port} for ${mac}`)
-				}
-				socket.close()
-			})
-		})
+		this.clearWolTimers()
+		for (let round = 0; round < WOL_REPEATS; round++) {
+			this.wolTimers.push(setTimeout(() => sendRound(round + 1), round * WOL_SPACING_MS))
+		}
+
+		// Reconnect quickly while the TV boots.
+		this.fastReconnectUntil = Date.now() + FAST_RECONNECT_WINDOW_MS
+		if (!this.isConnected() && this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer)
+			this.reconnectTimer = setTimeout(() => this.initConnection(), RECONNECT_FAST_MS)
+		}
 	}
 
 	startFeedbackPolling(): void {
@@ -316,6 +453,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			// transient read error we keep the previous value rather than blanking it,
 			// which avoids the brief "all variables go empty" blip; a real disconnect
 			// is handled by the connected check above.
+			let powerReadFailed = false
 			await this.runExclusive(async () => {
 				// getCurrentAppDetails runs the same CURRENT_APP command as getCurrentApp
 				// but also returns signal/HDCP info, so we get those for no extra round trip.
@@ -335,7 +473,8 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 						nextState.hdcpStatus = details.hdcpStatus ?? ''
 					}
 				} catch {
-					// keep previous app/power/signal/HDCP values
+					// keep previous app/power/signal/HDCP values (for now; see below)
+					powerReadFailed = true
 				}
 
 				try {
@@ -358,6 +497,17 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 					nextState.ipControlEnabled = false
 				}
 			})
+
+			if (powerReadFailed) {
+				this.failedPolls++
+				if (this.failedPolls >= MAX_FAILED_POLLS) {
+					this.failedPolls = 0
+					this.onConnectionLost(new Error(`no response to ${MAX_FAILED_POLLS} polls in a row`))
+					return
+				}
+			} else {
+				this.failedPolls = 0
+			}
 
 			this.feedbackState = nextState
 			this.checkFeedbacks()
