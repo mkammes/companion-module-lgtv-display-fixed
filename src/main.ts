@@ -45,6 +45,14 @@ const FAST_RECONNECT_WINDOW_MS = 120000
 const WOL_REPEATS = 5
 const WOL_SPACING_MS = 500
 const WOL_PORTS = [9, 7]
+// Every task on the socket is capped so a library promise that never settles
+// (its listeners were dropped by a disconnect) can't block the queue forever.
+// The poll runs four reads of up to 5 s each.
+const QUEUE_TASK_TIMEOUT_MS = 25000
+// Watchdog: restarts a stalled reconnect loop or a connection whose polls stopped.
+const WATCHDOG_MS = 10000
+const CONNECT_STALL_MS = 20000
+const POLL_STALL_MS = 30000
 const MAC_RE = /([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}/
 
 function normalizeMac(value: string | undefined | null): string {
@@ -81,7 +89,12 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	private feedbackPollInFlight = false
 	// Failed connects in a row, so the "TV may be off" notice logs only once.
 	private connectFailures = 0
-	private commandQueue = new PQueue({ concurrency: 1 })
+	private commandQueue = ModuleInstance.newQueue()
+	// Bumped on every connect attempt; results from older attempts are ignored.
+	private connectGen = 0
+	private connectStartedAt = 0
+	private lastGoodPoll = 0
+	private watchdogTimer: NodeJS.Timeout | undefined = undefined
 	private failedPolls = 0
 	private fastReconnectUntil = 0
 	private wolTimers: NodeJS.Timeout[] = []
@@ -90,6 +103,16 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 
 	constructor(internal: unknown) {
 		super(internal)
+	}
+
+	private static newQueue(): PQueue {
+		return new PQueue({ concurrency: 1, timeout: QUEUE_TASK_TIMEOUT_MS })
+	}
+
+	// Throw away the queue (including a task that may be stuck) and start a fresh one.
+	private resetQueue(): void {
+		this.commandQueue.clear()
+		this.commandQueue = ModuleInstance.newQueue()
 	}
 
 	async init(config: ModuleConfig): Promise<void> {
@@ -112,12 +135,42 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 		this.updateStatus(InstanceStatus.Connecting)
 		this.initLGTV()
 		this.initConnection()
+		this.startWatchdog()
+	}
+
+	private startWatchdog(): void {
+		if (this.watchdogTimer) clearInterval(this.watchdogTimer)
+		this.watchdogTimer = setInterval(() => this.watchdog(), WATCHDOG_MS)
+	}
+
+	// Safety net for the reconnect loop. If we're not connected, no retry is
+	// scheduled and no connect attempt is running (or one has hung), start one.
+	// If we're connected but no poll has succeeded for a while, drop the connection.
+	private watchdog(): void {
+		if (!this.config?.host || !this.config?.mac || !this.config?.code) return
+		const now = Date.now()
+		if (this.isConnected()) {
+			const pollingOn = Math.floor(Number(this.config.poll_interval)) !== 0
+			if (pollingOn && this.lastGoodPoll && now - this.lastGoodPoll > POLL_STALL_MS) {
+				this.log('debug', `Watchdog: no successful poll of ${this.config.host} for ${POLL_STALL_MS / 1000}s`)
+				this.onConnectionLost(new Error('polls stalled'))
+			}
+			return
+		}
+		if (this.reconnectTimer) return
+		if (this.connectStartedAt && now - this.connectStartedAt < CONNECT_STALL_MS) return
+		this.log('debug', `Watchdog: reconnect loop for ${this.config.host} had stalled, restarting it`)
+		this.initConnection()
 	}
 
 	async destroy(): Promise<void> {
 		if (this.reconnectTimer) {
 			clearTimeout(this.reconnectTimer)
 			this.reconnectTimer = null
+		}
+		if (this.watchdogTimer) {
+			clearInterval(this.watchdogTimer)
+			this.watchdogTimer = undefined
 		}
 		this.stopFeedbackPolling()
 		this.clearWolTimers()
@@ -171,8 +224,10 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			this.reconnectTimer = null
 		}
 		this.stopFeedbackPolling()
-		// Drop any commands still queued against the socket we're about to replace.
-		this.commandQueue.clear()
+		// Drop any commands still queued (or stuck) against the socket we're about to replace.
+		this.resetQueue()
+		const gen = ++this.connectGen
+		this.connectStartedAt = 0
 		if (this.lgtv !== undefined) {
 			this.lgtv.disconnect()
 			delete this.lgtv
@@ -188,10 +243,19 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 		if (this.config.host && this.config.mac && this.config.code) {
 			this.log('debug', `Connecting to ${this.config.host}`)
 			try {
-				this.lgtv = new LGTV(this.config.host, this.config.mac, this.config.code, this.DefaultSettings)
-				this.lgtv
+				const lgtv = new LGTV(this.config.host, this.config.mac, this.config.code, this.DefaultSettings)
+				this.lgtv = lgtv
+				this.connectStartedAt = Date.now()
+				lgtv
 					.connect()
 					.then(() => {
+						if (gen !== this.connectGen) {
+							// A newer attempt replaced this one; close the orphaned socket.
+							lgtv.disconnect()
+							return
+						}
+						this.connectStartedAt = 0
+						this.lastGoodPoll = Date.now()
 						this.connectFailures = 0
 						this.failedPolls = 0
 						this.fastReconnectUntil = 0
@@ -201,10 +265,13 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 						this.startFeedbackPolling()
 					})
 					.catch((error: unknown) => {
+						if (gen !== this.connectGen) return
+						this.connectStartedAt = 0
 						// A failed connect usually just means the TV is powered off.
 						this.onConnectionLost(error)
 					})
 			} catch (error) {
+				this.connectStartedAt = 0
 				this.onConnectionLost(error)
 			}
 		} else {
@@ -226,7 +293,10 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 				// ignore
 			}
 		}
-		this.commandQueue.clear()
+		// Invalidate any connect attempt still running, and drop queued or stuck tasks.
+		this.connectGen++
+		this.connectStartedAt = 0
+		this.resetQueue()
 		this.resetFeedbackState()
 
 		if (this.connectFailures === 0) {
@@ -454,49 +524,57 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 			// which avoids the brief "all variables go empty" blip; a real disconnect
 			// is handled by the connected check above.
 			let powerReadFailed = false
-			await this.runExclusive(async () => {
-				// getCurrentAppDetails runs the same CURRENT_APP command as getCurrentApp
-				// but also returns signal/HDCP info, so we get those for no extra round trip.
-				try {
-					const details = await lgtv.getCurrentAppDetails()
-					if (details === null) {
-						nextState.currentApp = ''
-						nextState.powerState = PowerStates.off
-						nextState.signal = undefined
-						nextState.hdcpVersion = ''
-						nextState.hdcpStatus = ''
-					} else {
-						nextState.currentApp = details.app ?? ''
-						nextState.powerState = PowerStates.on
-						nextState.signal = details.signal
-						nextState.hdcpVersion = details.hdcpVersion ?? ''
-						nextState.hdcpStatus = details.hdcpStatus ?? ''
+			try {
+				await this.runExclusive(async () => {
+					// getCurrentAppDetails runs the same CURRENT_APP command as getCurrentApp
+					// but also returns signal/HDCP info, so we get those for no extra round trip.
+					try {
+						const details = await lgtv.getCurrentAppDetails()
+						if (details === null) {
+							nextState.currentApp = ''
+							nextState.powerState = PowerStates.off
+							nextState.signal = undefined
+							nextState.hdcpVersion = ''
+							nextState.hdcpStatus = ''
+						} else {
+							nextState.currentApp = details.app ?? ''
+							nextState.powerState = PowerStates.on
+							nextState.signal = details.signal
+							nextState.hdcpVersion = details.hdcpVersion ?? ''
+							nextState.hdcpStatus = details.hdcpStatus ?? ''
+						}
+					} catch {
+						// keep previous app/power/signal/HDCP values (for now; see below)
+						powerReadFailed = true
 					}
-				} catch {
-					// keep previous app/power/signal/HDCP values (for now; see below)
-					powerReadFailed = true
-				}
 
-				try {
-					nextState.currentVolume = await lgtv.getCurrentVolume()
-				} catch {
-					// keep previous volume
-				}
+					try {
+						nextState.currentVolume = await lgtv.getCurrentVolume()
+					} catch {
+						// keep previous volume
+					}
 
-				try {
-					nextState.isMuted = await lgtv.getMuteState()
-				} catch {
-					// keep previous mute state
-				}
+					try {
+						nextState.isMuted = await lgtv.getMuteState()
+					} catch {
+						// keep previous mute state
+					}
 
-				// getIpControlState resolves true or throws; a throw means "not enabled",
-				// so false here is the intended reading, not a transient failure.
-				try {
-					nextState.ipControlEnabled = await lgtv.getIpControlState()
-				} catch {
-					nextState.ipControlEnabled = false
-				}
-			})
+					// getIpControlState resolves true or throws; a throw means "not enabled",
+					// so false here is the intended reading, not a transient failure.
+					try {
+						nextState.ipControlEnabled = await lgtv.getIpControlState()
+					} catch {
+						nextState.ipControlEnabled = false
+					}
+				})
+			} catch {
+				// The whole read timed out or the queue was reset under it.
+				powerReadFailed = true
+			}
+
+			// The connection was replaced while we were reading: ignore this result.
+			if (lgtv !== this.lgtv) return
 
 			if (powerReadFailed) {
 				this.failedPolls++
@@ -507,6 +585,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 				}
 			} else {
 				this.failedPolls = 0
+				this.lastGoodPoll = Date.now()
 			}
 
 			this.feedbackState = nextState

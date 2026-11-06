@@ -1,4 +1,4 @@
-# KCM build: 2.1.0-kcm.2
+# KCM build: 2.1.0-kcm.3
 
 Based on upstream `bitfocus/companion-module-lgtv-display` **v2.1.0-beta.2**, which already
 includes the three fixes from this fork's 2.0.1-kcm.1 (Send Key values, direct Wake-on-LAN,
@@ -16,6 +16,12 @@ includes the three fixes from this fork's 2.0.1-kcm.1 (Send Key values, direct W
    TV is on Wi-Fi.
 4. **Fast reconnect after Power On**: retries every 3 s for 2 minutes instead of 30 s.
 5. New variable `connected`.
+6. **kcm.3: no stalled reconnects.** A disconnect while a read was in flight could leave
+   that read hanging forever (the library drops the socket's listeners), which blocked the
+   command queue and stopped the reconnect loop. Now every queued task times out after 25 s,
+   the queue is replaced on disconnect, results from superseded connect attempts are
+   ignored, and a 10 s watchdog restarts a stalled reconnect loop or drops a connection
+   whose polls stopped succeeding for 30 s.
 
 Module id stays `lgtv-display`, so it can replace the stock version on existing connections.
 Build: `npm install && npx tsc -p tsconfig.build.json && npx companion-module-build`.
