@@ -1,4 +1,4 @@
-# KCM build: 2.1.0-kcm.4
+# KCM build: 2.1.0-kcm.5
 
 Based on upstream `bitfocus/companion-module-lgtv-display` **v2.1.0-beta.2**, which already
 includes the three fixes from this fork's 2.0.1-kcm.1 (Send Key values, direct Wake-on-LAN,
@@ -24,6 +24,8 @@ includes the three fixes from this fork's 2.0.1-kcm.1 (Send Key values, direct W
    whose polls stopped succeeding for 30 s.
 7. **kcm.4: visible command errors.** A failed command logs a warning with the TV's reply and
    sets the `last_error` variable.
+8. **kcm.5: faster off feedback.** After the TV acknowledges Power Off it shows as off at once,
+   and a poll whose power read gets no answer skips its other reads (5 s instead of 20 s).
 
 Module id stays `lgtv-display`, so it can replace the stock version on existing connections.
 Build: `npm install && npx tsc -p tsconfig.build.json && npx companion-module-build`.

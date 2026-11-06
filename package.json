@@ -1,6 +1,6 @@
 {
 	"name": "lgtv-display",
-	"version": "2.1.0-kcm.4",
+	"version": "2.1.0-kcm.5",
 	"type": "module",
 	"main": "dist/main.js",
 	"scripts": {

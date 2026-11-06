@@ -284,6 +284,17 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 
 	// Treat a lost/failed connection as an off TV: show "Disconnected", log once, and
 	// keep retrying quietly so we reconnect automatically when the TV returns.
+	// Called after the TV acknowledged Power Off. Show it as off right away and
+	// close the socket (the TV will drop off Wi-Fi anyway) instead of waiting for
+	// polls to time out. The reconnect loop picks it up again when it comes back.
+	markPoweredOff(): void {
+		this.connectFailures = 1 // skip the "TV may be off" info log, this was expected
+		this.onConnectionLost(new Error('powered off'))
+		this.feedbackState = { ...this.feedbackState, powerState: PowerStates.off }
+		this.checkFeedbacks()
+		this.checkVariables()
+	}
+
 	private onConnectionLost(error: unknown): void {
 		this.stopFeedbackPolling()
 		// Close the old socket so a half-dead connection can't keep reporting "connected".
@@ -556,6 +567,9 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 					} catch {
 						// keep previous app/power/signal/HDCP values (for now; see below)
 						powerReadFailed = true
+						// The TV didn't answer: skip the other reads so a gone TV is
+						// detected in ~5 s per poll instead of ~20 s.
+						return
 					}
 
 					try {
