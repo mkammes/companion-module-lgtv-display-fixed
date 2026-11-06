@@ -1,4 +1,4 @@
-# KCM build: 2.1.0-kcm.3
+# KCM build: 2.1.0-kcm.4
 
 Based on upstream `bitfocus/companion-module-lgtv-display` **v2.1.0-beta.2**, which already
 includes the three fixes from this fork's 2.0.1-kcm.1 (Send Key values, direct Wake-on-LAN,
@@ -22,6 +22,8 @@ includes the three fixes from this fork's 2.0.1-kcm.1 (Send Key values, direct W
    the queue is replaced on disconnect, results from superseded connect attempts are
    ignored, and a 10 s watchdog restarts a stalled reconnect loop or drops a connection
    whose polls stopped succeeding for 30 s.
+7. **kcm.4: visible command errors.** A failed command logs a warning with the TV's reply and
+   sets the `last_error` variable.
 
 Module id stays `lgtv-display`, so it can replace the stock version on existing connections.
 Build: `npm install && npx tsc -p tsconfig.build.json && npx companion-module-build`.

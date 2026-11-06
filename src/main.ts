@@ -100,6 +100,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	private wolTimers: NodeJS.Timeout[] = []
 	// MACs the TV reported about itself (GET_MACADDRESS), kept across reconnects.
 	detectedMacs: { wifi: string; wired: string } = { wifi: '', wired: '' }
+	lastError = ''
 
 	constructor(internal: unknown) {
 		super(internal)
@@ -377,7 +378,16 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	// Run a TV command (or a read-then-write sequence) with exclusive access to the
 	// socket, so it never interleaves with the poll loop or another action.
 	async runExclusive<T>(task: () => Promise<T>): Promise<T> {
-		return this.commandQueue.add(task)
+		try {
+			return await this.commandQueue.add(task)
+		} catch (error) {
+			// Make command failures visible: the TV's reply (e.g. "response not 'OK': NG")
+			// goes to the log and to the last_error variable.
+			this.lastError = `${new Date().toISOString().slice(11, 19)} ${errorMessage(error)}`
+			this.log('warn', `Command to ${this.config?.host} failed: ${errorMessage(error)}`)
+			this.checkVariables()
+			throw error
+		}
 	}
 
 	// The library's powerOn() swallows every send error and sends a single packet.
