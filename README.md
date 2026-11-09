@@ -33,6 +33,9 @@ includes the three fixes from this fork's 2.0.1-kcm.1 (Send Key values, direct W
    empty once the TV answers. Power Off no longer throws when the TV isn't connected.
 10. **kcm.7: Power Off race fix.** A status poll that was already running when Power Off was
     acknowledged could put the TV back to "on" in Buttons. Such stale polls are now discarded.
+11. **kcm.8: command trail.** Power On, Power Off and Set Input log "Command received" at info
+    level and set a new `last_command` variable (time and name), so a command that never reached
+    the module can be told apart from one the TV ignored. Set Input now warns when not connected.
 
 Module id stays `lgtv-display`, so it can replace the stock version on existing connections.
 Build: `npm install && npx tsc -p tsconfig.build.json && npx companion-module-build`.

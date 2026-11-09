@@ -106,6 +106,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	// MACs the TV reported about itself (GET_MACADDRESS), kept across reconnects.
 	detectedMacs: { wifi: string; wired: string } = { wifi: '', wired: '' }
 	lastError = ''
+	lastCommand = ''
 	// Power request in progress, exposed as the power_pending variable:
 	// '' (none), 'turning_on', 'turning_off', or 'no_response' (the TV never answered).
 	powerPending: '' | 'turning_on' | 'turning_off' | 'no_response' = ''
@@ -374,6 +375,14 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 				`None of the configured MACs (${configured.join(', ') || 'none'}) match the TV's own MACs. Power On also wakes the reported ones while this module keeps running, but put the right MAC in the config so it survives a restart.`,
 			)
 		}
+		this.checkVariables()
+	}
+
+	// Record every power/input command the module receives, so a command that
+	// never arrives (or arrives and does nothing) can be told apart afterwards.
+	noteCommand(name: string): void {
+		this.lastCommand = `${new Date().toISOString().slice(11, 19)} ${name}`
+		this.log('info', `Command received: ${name} (${this.config?.host}, connected=${this.isConnected()})`)
 		this.checkVariables()
 	}
 

@@ -16,6 +16,7 @@ export function UpdateActions(self: ModuleInstance): void {
 			name: 'Power On',
 			options: [],
 			callback: async () => {
+				self.noteCommand('power on')
 				self.requestPowerOn()
 			},
 		},
@@ -24,6 +25,7 @@ export function UpdateActions(self: ModuleInstance): void {
 			name: 'Power Off',
 			options: [],
 			callback: async () => {
+				self.noteCommand('power off')
 				await self.requestPowerOff()
 			},
 		},
@@ -80,14 +82,17 @@ export function UpdateActions(self: ModuleInstance): void {
 				},
 			],
 			callback: async (action) => {
+				self.noteCommand(`set input ${String(action.options.input)}`)
 				const lgtv = self.lgtv
-				if (lgtv) {
-					await self.runExclusive(async () => {
-						await lgtv.setInput(action.options.input as Inputs)
-					})
-					self.log('debug', `Input set to ${String(action.options.input)}`)
-					void self.updateFeedbackState()
+				if (!lgtv) {
+					self.log('warn', `Set input: ${self.config?.host} is not connected, command not sent`)
+					return
 				}
+				await self.runExclusive(async () => {
+					await lgtv.setInput(action.options.input as Inputs)
+				})
+				self.log('debug', `Input set to ${String(action.options.input)}`)
+				void self.updateFeedbackState()
 			},
 		},
 
