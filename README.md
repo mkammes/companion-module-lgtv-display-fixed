@@ -1,27 +1,50 @@
-# companion-module-lgtv-display-fixed
+# KCM build: 2.1.0-kcm.7
 
-Fork of the Bitfocus LG TV Companion module with three bug fixes applied.
+Based on upstream `bitfocus/companion-module-lgtv-display` **v2.1.0-beta.2**, which already
+includes the three fixes from this fork's 2.0.1-kcm.1 (Send Key values, direct Wake-on-LAN,
+30 s auto-reconnect). On top of that, for LG TVs on Wi-Fi (tested target: SK8000PUA, webOS 4):
 
-## Fixes included
+1. **No more stale "on".** When a TV drops off the network the socket stays open and every
+   read times out, and the module kept the last values forever. Now 2 failed polls in a row
+   close the connection, reset state to unknown and start the reconnect loop.
+2. **Wake-on-LAN burst.** Power On sends 5 rounds, 0.5 s apart, to every known MAC (config
+   MAC, new optional *Second MAC*, and the MACs the TV reported), to the configured broadcast,
+   255.255.255.255 and the TV's own IP, on ports 9 and 7.
+3. **MAC auto-detect.** On connect the module asks the TV for its Wi-Fi and wired MACs
+   (`GET_MACADDRESS`), exposes them as `mac_wifi` / `mac_wired`, and logs a warning when
+   neither matches the config. The hidden 82888 menu often shows the wired MAC even when the
+   TV is on Wi-Fi.
+4. **Fast reconnect after Power On**: retries every 3 s for 2 minutes instead of 30 s.
+5. New variable `connected`.
+6. **kcm.3: no stalled reconnects.** A disconnect while a read was in flight could leave
+   that read hanging forever (the library drops the socket's listeners), which blocked the
+   command queue and stopped the reconnect loop. Now every queued task times out after 25 s,
+   the queue is replaced on disconnect, results from superseded connect attempts are
+   ignored, and a 10 s watchdog restarts a stalled reconnect loop or drops a connection
+   whose polls stopped succeeding for 30 s.
+7. **kcm.4: visible command errors.** A failed command logs a warning with the TV's reply and
+   sets the `last_error` variable.
+8. **kcm.5: faster off feedback.** After the TV acknowledges Power Off it shows as off at once,
+   and a poll whose power read gets no answer skips its other reads (5 s instead of 20 s).
+9. **kcm.6: wake until it answers, and a power_pending variable.** Power On repeats the
+   Wake-on-LAN burst every 3 s for up to 60 s until the TV reports on (fixes Off then On within a
+   few seconds, and TVs slow to rejoin Wi-Fi). New `power_pending` variable: `turning_on`,
+   `turning_off`, `no_response` (on: no answer in 60 s; off: TV not connected or command failed),
+   empty once the TV answers. Power Off no longer throws when the TV isn't connected.
+10. **kcm.7: Power Off race fix.** A status poll that was already running when Power Off was
+    acknowledged could put the TV back to "on" in Buttons. Such stale polls are now discarded.
+11. **kcm.9 (kcm.8 was mispackaged with kcm.7 code): command trail.** Power On, Power Off and Set Input log "Command received" at info
+    level and set a new `last_command` variable (time and name), so a command that never reached
+    the module can be told apart from one the TV ignored. Set Input now warns when not connected.
 
-### 1. Send Key value mapping
-The original module populated the Send Key dropdown with enum *names* (e.g. `volumeUp`) but `lgtv-ip-control.sendKey()` expects enum *values*. Keys like volume up/down and navigation were silently failing. This fork passes the correct values, with a backward-compatibility fallback for previously saved actions.
+Module id stays `lgtv-display`, so it can replace the stock version on existing connections.
+Build: `npm install && npx tsc -p tsconfig.build.json && npx companion-module-build`.
 
-### 2. Power On / Wake-on-LAN
-The original `powerOn` relied on the socket connection being alive. If the TV was in standby or had dropped off the network, WoL never fired. This fork sends the magic UDP packet directly via Node's `dgram`, independent of the connection state, so Power On works even when the TV is off.
+---
 
-### 3. Auto-reconnect
-Once the TV dropped off the network, the original module stayed in `ConnectionFailure` indefinitely. This fork retries the connection every 30 seconds automatically, so Companion recovers without manual intervention after standby or a network blip.
+# companion-module-lg-display
 
-## Building
-
-```bash
-npm install
-npm run build
-```
-
-Output goes to `pkg/`. The built `main.js` is committed to this repo for direct Companion installation.
-
-## Upstream source
-
-Based on [`bitfocus/companion-module-lgtv-display`](https://github.com/bitfocus/companion-module-lgtv-display) and [`WesSouza/lgtv-ip-control`](https://github.com/WesSouza/lgtv-ip-control).
+- See [HELP](./companion/HELP.md) for getting started information
+- See [CHANGELOG.md](./companion/CHANGELOG.md) for release notes
+- [LICENSE](./LICENSE)
+- This module uses the [lgtv-ip-control library](https://github.com/WesSouza/lgtv-ip-control)

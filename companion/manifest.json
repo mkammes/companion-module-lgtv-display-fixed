@@ -1,1 +1,26 @@
-{"id":"lgtv-display-fixed","name":"lgtv-display-fixed","shortname":"LGTV Fix","description":"LG Display module with fixes for Send Key mapping, Wake-on-LAN, and auto-reconnect","version":"2.0.1-kcm.1","license":"MIT","repository":"git+https://github.com/mkammes/companion-module-lgtv-display-fixed.git","bugs":"https://github.com/mkammes/companion-module-lgtv-display-fixed/issues","maintainers":[{"name":"Michael Kammes","email":""}],"legacyIds":[],"runtime":{"type":"node18","api":"nodejs-ipc","apiVersion":"1.10.0","entrypoint":"../main.js"},"manufacturer":"LG Electronics","products":["LG Display"],"keywords":["TV","Display","LG"]}
+{
+	"id": "lgtv-display",
+	"name": "lgtv-display",
+	"shortname": "LGTV",
+	"description": "A module for compatible LG Displays",
+	"version": "0.0.0",
+	"license": "MIT",
+	"repository": "git+https://github.com/bitfocus/companion-module-lgtv-display.git",
+	"bugs": "https://github.com/bitfocus/companion-module-lgtv-display/issues",
+	"maintainers": [
+		{
+			"name": "Jeffrey Davidsz",
+			"email": "jeffrey.davidsz@vicreo.eu"
+		}
+	],
+	"legacyIds": [],
+	"runtime": {
+		"type": "node22",
+		"api": "nodejs-ipc",
+		"apiVersion": "0.0.0",
+		"entrypoint": "../dist/main.js"
+	},
+	"manufacturer": "LG",
+	"products": ["Display"],
+	"keywords": ["tv", "consumer", "OLED"]
+}
